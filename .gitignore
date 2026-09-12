@@ -26,5 +26,8 @@ report.md
 scratch/
 tmp/
 
-# Tool sandbox leftovers
+# Tool sandbox leftovers (fixtures NOTES.md/prices.txt stay tracked; runs generate the rest)
 workdir/__pycache__/
+workdir/*.md
+!workdir/NOTES.md
+!workdir/prices.txt
