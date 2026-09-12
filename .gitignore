@@ -1,0 +1,30 @@
+# ollama-react-agent — standalone repo ignores
+.commandcode/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.so
+.env
+.env.*
+
+# Agent run artifacts (regenerated every run)
+trace.jsonl
+*.db
+*.sqlite
+out.md
+report.md
+
+# OS / editor junk
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local notes / scratch
+*.local.md
+scratch/
+tmp/
+
+# Tool sandbox leftovers
+workdir/__pycache__/
