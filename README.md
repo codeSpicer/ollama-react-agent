@@ -65,6 +65,63 @@ Two wirings for the SAME tool:
 The trace (every Thought/Action/Observation with timestamps) is the primary artifact —
 "you can read the trace and explain each tool decision" is the definition of done.
 
+## First-principles guide — read this if ReAct / MCP feels fuzzy
+
+### How an LLM "calls a tool" (it's not magic)
+
+1. The LLM never touches files or the web itself. Your code passes it `tools=[...]`
+   schemas (these live in `react_agent/tools.py`).
+2. The model replies with a structured `tool_calls` object, e.g.
+   `calculator(expression="17*23")` — not the answer, just a *request*.
+3. Your `dispatch(name, args)` runs the real Python function, gets a string back
+   like `"391"`, appends it as an `Observation` message, and calls the model again.
+4. The model sees the result and reasons again. That
+   Thought → Action → Observation repeat *is* ReAct.
+
+Worked trace for `evals/tasks.md` S1 ("What is 17*23?"):
+
+```
+User task → Model: call calculator(17*23) → you run it → Observation: 391
+→ Model: Final Answer: 391
+```
+
+### MCP in one paragraph
+
+MCP is the same thing with one extra hop: instead of `dispatch()` calling the Python
+function directly, it asks a separate MCP server process over stdio. Think USB-C vs
+hard-wired — same tool, decoupled. Same task, same pass rate, small +ms latency.
+That latency delta *is* the MCP tradeoff interviewers ask about.
+
+### Watch in this order
+
+- ReAct concept: https://www.youtube.com/watch?v=WBgI9ce_7wM
+- ReAct loop with a debugging example: https://www.youtube.com/watch?v=QbJm3QsL414
+- Ollama native tool-calling (what `qwen3.5:4b` does): https://www.youtube.com/watch?v=jzruyK0xNPg
+- MCP from zero, hands-on playlist: https://www.youtube.com/playlist?list=PLlrxD0HtieHjYfVUpGl_-ai7D6FRBjV-d
+- Code-along companion: https://github.com/microsoft/mcp-for-beginners
+- Ollama tool-calling docs: https://docs.ollama.com/capabilities/tool-calling
+
+### Micro-task ladder (15–20 min each, in order)
+
+1. **Be the loop on paper.** Take S1, write out *your* Thought / Action / Observation /
+   Final Answer by hand. That's all ReAct is.
+2. **See a raw `tool_calls` object.** No loop yet — one `ollama.chat(model="qwen3.5:4b",
+   messages=[...], tools=TOOLS)`, print `response.message.tool_calls`. Prove the model
+   emits a request, not text.
+3. **Hand-run 2 steps.** Copy the `tool_calls` args, call `dispatch("calculator", args)`
+   yourself, send the result back as `{"role": "tool", "content": "391"}` in a second
+   `ollama.chat`. Watch it produce the final answer. This is the whole loop, manually.
+4. **Close the loop (Phase 2).** Wrap step 3 in `while steps < 5`. Run no-tool task N1
+   (haiku — correct = *zero* `tool_calls`) and error task E1 (`note.md` lowercase →
+   `ERROR: file not found` observation → model retries `NOTES.md`).
+5. **Break it on purpose.** max-steps=1 on 3-step task M2, kill network during
+   `web_search`, ask for `/etc/passwd`. Each must end as a readable `ERROR`
+   observation, never a crash.
+6. **MCP swap (Phase 4).** Expose just `read_file` as an MCP server, route that one entry
+   through `mcp_client` instead of direct call. Run S2 both ways — same pass, small +ms.
+
+If you do 2 and 3, step 4 clicks fast.
+
 ## Setup
 
 ```bash
@@ -79,13 +136,13 @@ python -m react_agent run "read NOTES.md and summarize it" --trace
 python -m react_agent run "search the web for <topic> and save findings to out.md" --trace --mcp
 ```
 
-| Flag | Where | Default | Meaning |
-| ---- | ----- | ------- | ------- |
-| `--trace` | run | off | print every Thought/Action/Observation |
-| `--max-steps` | run | `10` | loop guard before forced termination |
-| `--mcp` | run | off | route eligible tools through the MCP server instead of in-process |
-| `--model` | run | `qwen3.5:4b` | must support native `tools=` calling |
-| `--log` | run | `trace.jsonl` | append machine-readable trajectory per run |
+| Flag          | Where | Default       | Meaning                                                           |
+| ------------- | ----- | ------------- | ----------------------------------------------------------------- |
+| `--trace`     | run   | off           | print every Thought/Action/Observation                            |
+| `--max-steps` | run   | `10`          | loop guard before forced termination                              |
+| `--mcp`       | run   | off           | route eligible tools through the MCP server instead of in-process |
+| `--model`     | run   | `qwen3.5:4b`  | must support native`tools=` calling                               |
+| `--log`       | run   | `trace.jsonl` | append machine-readable trajectory per run                        |
 
 ## Project layout (files you will create)
 
@@ -116,7 +173,7 @@ Tool set to implement (each: name, description, JSON schema, handler, error path
 ### Phase 0 — Task set first (before any agent code)
 
 - [ ] Write `evals/tasks.md` with 8–12 tasks across 4 buckets:
-  - **single-tool** (2–3): "what is 17*23" → calculator only.
+  - **single-tool** (2–3): "what is 17\*23" → calculator only.
   - **multi-step** (3–4): "search X, save summary to file" → search → write.
   - **error-recovery** (2–3): task whose first attempt SHOULD fail (bad path, missing arg) → agent must retry corrected.
   - **no-tool** (1–2): "write a haiku" → must answer directly with zero tool calls (over-triggering is a bug).
@@ -125,47 +182,47 @@ Tool set to implement (each: name, description, JSON schema, handler, error path
 ### Phase 1 — Tools + schemas (no LLM yet)
 
 - [ ] `tools.py`: implement the 4–5 tools as plain functions with JSON schemas
-  (`name`, `description`, `parameters` with types/required). Descriptions must say WHEN to use the tool —
-  the model selects tools by reading these, so "reads a file" < "reads a UTF-8 text file under workdir; use when the task references a local file."
+      (`name`, `description`, `parameters` with types/required). Descriptions must say WHEN to use the tool —
+      the model selects tools by reading these, so "reads a file" < "reads a UTF-8 text file under workdir; use when the task references a local file."
 - [ ] Unit-test each tool directly (bad args, missing file, network down) — every failure returns a STRING error,
-  never raises out of the registry.
+      never raises out of the registry.
 - [ ] Verify: call each tool from a REPL with good + bad inputs; all bad inputs produce clean error strings.
 
 ### Phase 2 — The loop, framework-free (the core)
 
 - [ ] `loop.py`: system prompt (role + tool list + ReAct format + "Final Answer:" convention) →
-  `ollama.chat(tools=...)` → if `tool_calls`, validate args against schema → dispatch → append observation → repeat.
+      `ollama.chat(tools=...)` → if `tool_calls`, validate args against schema → dispatch → append observation → repeat.
 - [ ] Native tool-calling first (`tools=` param). Log whether the model used native calls vs free-text —
-  if it emits fake JSON instead of `tool_calls`, your model is too weak: switch models, don't regex-parse around it
-  (record which model failed — that's a finding).
+      if it emits fake JSON instead of `tool_calls`, your model is too weak: switch models, don't regex-parse around it
+      (record which model failed — that's a finding).
 - [ ] `--max-steps 10` guard: on exceed, force-terminate with partial trace (never hang, never infinite-bill).
 - [ ] Verify: single-tool + no-tool tasks pass with a trace you can narrate line by line.
 
 ### Phase 3 — Errors as observations + multi-step
 
 - [ ] Every tool exception → `"ERROR: <what> — <how to fix>"` observation fed back to the model
-  (e.g. `ERROR: file not found: x.md — available files: a.md, b.md`).
+      (e.g. `ERROR: file not found: x.md — available files: a.md, b.md`).
 - [ ] Run the multi-step + error-recovery buckets; keep traces where the agent visibly corrects itself.
 - [ ] Verify: at least one error-recovery task shows Thought ("that path failed, trying…") → corrected Action → success.
-  A crash or give-up on first error is a Phase-3 failure.
+      A crash or give-up on first error is a Phase-3 failure.
 
 ### Phase 4 — MCP server + client (same tools, second wiring)
 
 - [ ] `mcp_server.py`: expose `read_file` (pick one tool first) as an MCP server over stdio
-  (tool definition + handler, per MCP SDK docs).
+      (tool definition + handler, per MCP SDK docs).
 - [ ] `mcp_client.py`: wrapper exposing the IDENTICAL `(name, schema, handler)` interface as `tools.py`
-  so `loop.py` can't tell which wiring it's calling.
+      so `loop.py` can't tell which wiring it's calling.
 - [ ] `--mcp` flag swaps the registry entry from in-process to MCP-backed; run the same task both ways.
 - [ ] Verify: identical task succeeds via both wirings; `--trace` shows which wiring served each call.
-  Record added latency of the MCP hop (expect small but nonzero — measure yours).
+      Record added latency of the MCP hop (expect small but nonzero — measure yours).
 
 ### Phase 5 — Trace report (the deliverable)
 
 - [ ] Run the FULL task set twice (in-process, MCP); fill the table below.
 - [ ] Save 2 annotated traces: one clean multi-step success, one error→recovery — with a sentence per step
-  explaining WHY the model chose that action.
+      explaining WHY the model chose that action.
 - [ ] Write 1-page verdict: where the agent wastes steps, which tool descriptions caused mis-selections
-  (and your rewrites), MCP cost/benefit in your numbers.
+      (and your rewrites), MCP cost/benefit in your numbers.
 
 ---
 
